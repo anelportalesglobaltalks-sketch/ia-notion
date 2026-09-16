@@ -60,7 +60,7 @@ async function searchDrive(saKeyJson, query) {
 
 async function interpretarConGemini(apiKey, pregunta, resultados) {
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
   const listado = resultados
     .map((r, i) => `${i + 1}. [${r.source.toUpperCase()}] "${r.title}" -> ${r.url}`)
