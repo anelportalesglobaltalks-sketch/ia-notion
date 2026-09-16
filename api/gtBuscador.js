@@ -32,7 +32,29 @@ async function searchNotion(token, query) {
   }
 }
 
-async function searchDrive(saKeyJson, query) {
+/**
+ * Recolecta el ID de folderId y todos sus subcarpetas descendientes
+ * (recursivo), para poder restringir la búsqueda a "esta carpeta y
+ * todo lo que hay adentro".
+ */
+async function recolectarSubcarpetas(drive, folderId, acumulado = []) {
+  acumulado.push(folderId);
+
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: "files(id)",
+    pageSize: 100,
+  });
+
+  const hijos = res.data.files || [];
+  for (const hijo of hijos) {
+    await recolectarSubcarpetas(drive, hijo.id, acumulado);
+  }
+
+  return acumulado;
+}
+
+async function searchDrive(saKeyJson, query, folderId) {
   try {
     const credentials = JSON.parse(saKeyJson);
     const auth = new google.auth.GoogleAuth({
@@ -41,8 +63,19 @@ async function searchDrive(saKeyJson, query) {
     });
     const drive = google.drive({ version: "v3", auth });
 
+    const textoEscapado = query.replace(/'/g, "\\'");
+    let q = `fullText contains '${textoEscapado}' and trashed = false`;
+
+    // Si viene un filtro de carpeta (Año/Equipo elegido en los desplegables),
+    // restringimos a esa carpeta y a todas sus subcarpetas.
+    if (folderId) {
+      const ids = await recolectarSubcarpetas(drive, folderId);
+      const clausulaParents = ids.map((id) => `'${id}' in parents`).join(" or ");
+      q += ` and (${clausulaParents})`;
+    }
+
     const res = await drive.files.list({
-      q: `fullText contains '${query.replace(/'/g, "\\'")}'`,
+      q,
       fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
       pageSize: 8,
     });
@@ -117,7 +150,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Usa POST" });
   }
 
-  const { query } = req.body || {};
+  const { query, folderId } = req.body || {};
   if (!query || typeof query !== "string") {
     return res.status(400).json({ error: "Falta 'query' en el body" });
   }
@@ -125,7 +158,7 @@ export default async function handler(req, res) {
   try {
     const [notionResults, driveResults] = await Promise.all([
       searchNotion(process.env.NOTION_TOKEN, query),
-      searchDrive(process.env.GDRIVE_SA_KEY, query),
+      searchDrive(process.env.GDRIVE_SA_KEY, query, folderId),
     ]);
 
     const resultados = [...notionResults, ...driveResults];

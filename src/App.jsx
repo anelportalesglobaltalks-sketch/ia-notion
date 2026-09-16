@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const FUNCTION_URL = "/api/gtBuscador";
+const FOLDERS_URL = "/api/folders";
 
 function iconoPara(url = "") {
   if (url.includes("/folders/")) return "📁";
@@ -16,6 +17,52 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [errored, setErrored] = useState(false);
 
+  const [anios, setAnios] = useState([]);
+  const [equipos, setEquipos] = useState([]);
+  const [anioId, setAnioId] = useState("");
+  const [equipoId, setEquipoId] = useState("");
+  const [cargandoAnios, setCargandoAnios] = useState(true);
+  const [cargandoEquipos, setCargandoEquipos] = useState(false);
+
+  // Carga los Años (subcarpetas de la carpeta general) al abrir la página
+  useEffect(() => {
+    async function cargarAnios() {
+      try {
+        const res = await fetch(FOLDERS_URL);
+        const json = await res.json();
+        setAnios(json.carpetas || []);
+      } catch {
+        setAnios([]);
+      } finally {
+        setCargandoAnios(false);
+      }
+    }
+    cargarAnios();
+  }, []);
+
+  // Cuando eligen un Año, carga los Equipos de esa carpeta
+  useEffect(() => {
+    if (!anioId) {
+      setEquipos([]);
+      setEquipoId("");
+      return;
+    }
+    async function cargarEquipos() {
+      setCargandoEquipos(true);
+      setEquipoId("");
+      try {
+        const res = await fetch(`${FOLDERS_URL}?parentId=${anioId}`);
+        const json = await res.json();
+        setEquipos(json.carpetas || []);
+      } catch {
+        setEquipos([]);
+      } finally {
+        setCargandoEquipos(false);
+      }
+    }
+    cargarEquipos();
+  }, [anioId]);
+
   async function buscar() {
     const q = query.trim();
     if (!q || loading) return;
@@ -24,11 +71,14 @@ export default function App() {
     setErrored(false);
     setData(null);
 
+    // Si hay Equipo elegido, filtra por ahí; si no, por el Año; si no, sin filtro.
+    const folderId = equipoId || anioId || undefined;
+
     try {
       const res = await fetch(FUNCTION_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q }),
+        body: JSON.stringify({ query: q, folderId }),
       });
       const json = await res.json();
       setData(json.respuesta);
@@ -54,6 +104,44 @@ export default function App() {
           exactamente dónde está.
         </p>
       </header>
+
+      <div className="filters-row">
+        <select
+          className="filter-select"
+          value={anioId}
+          onChange={(e) => setAnioId(e.target.value)}
+          disabled={cargandoAnios}
+        >
+          <option value="">
+            {cargandoAnios ? "Cargando años…" : "Todos los años"}
+          </option>
+          {anios.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className="filter-select"
+          value={equipoId}
+          onChange={(e) => setEquipoId(e.target.value)}
+          disabled={!anioId || cargandoEquipos}
+        >
+          <option value="">
+            {!anioId
+              ? "Elige un año primero"
+              : cargandoEquipos
+              ? "Cargando equipos…"
+              : "Todos los equipos"}
+          </option>
+          {equipos.map((eq) => (
+            <option key={eq.id} value={eq.id}>
+              {eq.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div className="search-row">
         <input
@@ -117,7 +205,7 @@ export default function App() {
         .hero {
           text-align: center;
           max-width: 480px;
-          margin-bottom: 40px;
+          margin-bottom: 32px;
         }
 
         .eyebrow {
@@ -147,6 +235,30 @@ export default function App() {
           color: var(--slate-400);
           font-size: 0.98rem;
           line-height: 1.5;
+        }
+
+        .filters-row {
+          width: 100%;
+          max-width: 560px;
+          display: flex;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+
+        .filter-select {
+          flex: 1;
+          padding: 11px 12px;
+          border-radius: 8px;
+          border: 1px solid var(--navy-700);
+          background: var(--navy-800);
+          color: var(--cream-100);
+          font-family: inherit;
+          font-size: 0.88rem;
+          outline: none;
+        }
+
+        .filter-select:disabled {
+          opacity: 0.5;
         }
 
         .search-row {
@@ -284,6 +396,7 @@ export default function App() {
           .wordmark {
             font-size: 2.1rem;
           }
+          .filters-row,
           .search-row {
             flex-direction: column;
           }
