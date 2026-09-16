@@ -2,10 +2,26 @@
   box-sizing: border-box;
 }
 
-body {
+:root {
+  --navy-950: #0b1526;
+  --navy-800: #13233d;
+  --navy-700: #1c3255;
+  --gold-500: #c9a24b;
+  --gold-300: #ddc383;
+  --cream-100: #f3efe6;
+  --slate-400: #8ca0be;
+}
+
+html, body {
   margin: 0;
+  background: var(--navy-950);
+}
+
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  color: var(--cream-100);
 }
 
 a {
-  color: #818cf8;
+  color: var(--gold-300);
 }

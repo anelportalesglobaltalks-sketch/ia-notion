@@ -67,23 +67,44 @@ async function interpretarConGemini(apiKey, pregunta, resultados) {
     .join("\n");
 
   const prompt = `
-Eres el buscador interno de "Global Talks" (GT). Un integrante te hizo esta pregunta:
-"${pregunta}"
+Eres el buscador interno de "Global Talks" (GT), grupo extraacadémico de la UPC.
+Un integrante te hizo esta pregunta: "${pregunta}"
 
 Estos son los resultados encontrados en Notion y Google Drive:
 ${listado || "(no se encontraron resultados)"}
 
-Instrucciones para tu respuesta:
-- Si hay un resultado que responde claramente a la pregunta, respóndele empezando con
-  "Hola GTcito, encontré esta información aquí:" seguido del título y el link, SIN dar resumen del contenido.
-- Si hay más de un resultado relevante, lista los principales (título + link).
-- Si no encontraste nada relevante en Notion, NO lo menciones — solo presenta lo de Drive (o viceversa).
-- Cierra siempre ofreciendo ayuda para cualquier otra cosa.
-- No inventes links ni documentos que no estén en la lista de resultados.
+Responde ÚNICAMENTE con un objeto JSON válido, sin texto antes ni después,
+sin markdown, sin bloques de código, con esta forma exacta:
+
+{
+  "intro": "una frase corta que empiece exactamente con 'Hola GTcito, encontré esta información aquí:' (o, si no hay nada relevante, una frase breve explicando que no se encontró nada)",
+  "items": [
+    { "title": "título del documento tal cual aparece en la lista", "url": "el link exacto de la lista" }
+  ],
+  "outro": "una frase corta y amable ofreciendo ayuda para cualquier otra cosa"
+}
+
+Reglas:
+- No inventes documentos ni links que no estén en la lista de resultados.
+- Si no encontraste nada relevante en una fuente (Notion o Drive), simplemente no la menciones ni en "intro" ni en "items" — no expliques que faltó.
+- Incluye en "items" solo los documentos realmente relevantes a la pregunta (máximo 5).
+- No uses asteriscos, negritas en markdown, ni viñetas dentro de los textos — el formato lo pone la interfaz.
 `.trim();
 
   const result = await model.generateContent(prompt);
-  return result.response.text();
+  const raw = result.response.text().trim();
+
+  const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    return {
+      intro: raw,
+      items: [],
+      outro: "¿Te puedo ayudar con algo más?",
+    };
+  }
 }
 
 export default async function handler(req, res) {
@@ -114,7 +135,7 @@ export default async function handler(req, res) {
       resultados
     );
 
-    return res.status(200).json({ respuesta, resultados });
+    return res.status(200).json({ respuesta });
   } catch (err) {
     console.error("Error general:", err);
     return res.status(500).json({ error: "Error interno", detail: err.message });
