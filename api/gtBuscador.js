@@ -6,8 +6,9 @@
  * Variables de entorno necesarias (configúralas en Vercel → Project →
  * Settings → Environment Variables):
  *   NOTION_TOKEN
- *   GDRIVE_SA_KEY   (el JSON completo de la service account, como string)
+ *   GDRIVE_SA_KEY         (el JSON completo de la service account, como string)
  *   GEMINI_API_KEY
+ *   GDRIVE_ROOT_FOLDER_ID (opcional, para los desplegables Año/Equipo)
  */
 
 import { Client as NotionClient } from "@notionhq/client";
@@ -63,23 +64,62 @@ async function recolectarSubcarpetas(drive, rootId) {
   return todos;
 }
 
+function dividirEnBloques(arr, tamano) {
+  const bloques = [];
+  for (let i = 0; i < arr.length; i += tamano) {
+    bloques.push(arr.slice(i, i + tamano));
+  }
+  return bloques;
+}
+
 async function ejecutarBusquedaDrive(drive, query, folderId) {
   const textoEscapado = query.replace(/'/g, "\\'");
-  let q = `fullText contains '${textoEscapado}' and trashed = false`;
+  const baseQ = `fullText contains '${textoEscapado}' and trashed = false`;
 
-  if (folderId) {
-    const ids = await recolectarSubcarpetas(drive, folderId);
-    const clausulaParents = ids.map((id) => `'${id}' in parents`).join(" or ");
-    q += ` and (${clausulaParents})`;
+  // Sin filtro de carpeta: una sola consulta normal.
+  if (!folderId) {
+    const res = await drive.files.list({
+      q: baseQ,
+      fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
+      pageSize: 8,
+    });
+    return (res.data.files || []).map((f) => ({
+      source: "drive",
+      title: f.name,
+      url: f.webViewLink,
+    }));
   }
 
-  const res = await drive.files.list({
-    q,
-    fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
-    pageSize: 8,
-  });
+  // Con filtro: la carpeta puede tener muchas subcarpetas, y meter todos
+  // los IDs en un solo "or" gigante puede exceder el límite de longitud
+  // que acepta la API de Drive (error 400). Lo partimos en bloques.
+  const ids = await recolectarSubcarpetas(drive, folderId);
+  const bloques = dividirEnBloques(ids, 20);
 
-  return (res.data.files || []).map((f) => ({
+  const respuestasPorBloque = await Promise.all(
+    bloques.map((bloque) => {
+      const clausulaParents = bloque.map((id) => `'${id}' in parents`).join(" or ");
+      const q = `${baseQ} and (${clausulaParents})`;
+      return drive.files.list({
+        q,
+        fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
+        pageSize: 8,
+      });
+    })
+  );
+
+  const vistos = new Set();
+  const archivos = [];
+  for (const res of respuestasPorBloque) {
+    for (const f of res.data.files || []) {
+      if (!vistos.has(f.id)) {
+        vistos.add(f.id);
+        archivos.push(f);
+      }
+    }
+  }
+
+  return archivos.slice(0, 8).map((f) => ({
     source: "drive",
     title: f.name,
     url: f.webViewLink,
@@ -110,7 +150,25 @@ async function searchDrive(saKeyJson, query, folderId) {
     return { resultados: resultadosFiltrados, fueraDelFiltro: false };
   } catch (err) {
     console.error("Error buscando en Drive:", err.message);
-    return { resultados: [], fueraDelFiltro: false };
+
+    // Si el error fue específicamente en la búsqueda filtrada, igual
+    // intentamos el respaldo sin filtro antes de rendirnos.
+    try {
+      const credentials = JSON.parse(saKeyJson);
+      const auth = new google.auth.GoogleAuth({
+        credentials,
+        scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      });
+      const drive = google.drive({ version: "v3", auth });
+      const resultadosGlobales = await ejecutarBusquedaDrive(drive, query, undefined);
+      return {
+        resultados: resultadosGlobales,
+        fueraDelFiltro: Boolean(folderId) && resultadosGlobales.length > 0,
+      };
+    } catch (err2) {
+      console.error("Error en búsqueda de respaldo:", err2.message);
+      return { resultados: [], fueraDelFiltro: false };
+    }
   }
 }
 
