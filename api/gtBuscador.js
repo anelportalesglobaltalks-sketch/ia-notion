@@ -33,25 +33,57 @@ async function searchNotion(token, query) {
 }
 
 /**
- * Recolecta el ID de folderId y todos sus subcarpetas descendientes
- * (recursivo), para poder restringir la búsqueda a "esta carpeta y
- * todo lo que hay adentro".
+ * Recolecta el ID de rootId y todos sus subcarpetas descendientes,
+ * nivel por nivel, consultando TODAS las carpetas de un mismo nivel
+ * en paralelo (mucho más rápido que ir una por una).
  */
-async function recolectarSubcarpetas(drive, folderId, acumulado = []) {
-  acumulado.push(folderId);
+async function recolectarSubcarpetas(drive, rootId) {
+  const todos = [rootId];
+  let nivelActual = [rootId];
 
-  const res = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-    fields: "files(id)",
-    pageSize: 100,
-  });
+  while (nivelActual.length > 0) {
+    const respuestas = await Promise.all(
+      nivelActual.map((id) =>
+        drive.files.list({
+          q: `'${id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: "files(id)",
+          pageSize: 100,
+        })
+      )
+    );
 
-  const hijos = res.data.files || [];
-  for (const hijo of hijos) {
-    await recolectarSubcarpetas(drive, hijo.id, acumulado);
+    const siguienteNivel = respuestas.flatMap((r) =>
+      (r.data.files || []).map((f) => f.id)
+    );
+
+    todos.push(...siguienteNivel);
+    nivelActual = siguienteNivel;
   }
 
-  return acumulado;
+  return todos;
+}
+
+async function ejecutarBusquedaDrive(drive, query, folderId) {
+  const textoEscapado = query.replace(/'/g, "\\'");
+  let q = `fullText contains '${textoEscapado}' and trashed = false`;
+
+  if (folderId) {
+    const ids = await recolectarSubcarpetas(drive, folderId);
+    const clausulaParents = ids.map((id) => `'${id}' in parents`).join(" or ");
+    q += ` and (${clausulaParents})`;
+  }
+
+  const res = await drive.files.list({
+    q,
+    fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
+    pageSize: 8,
+  });
+
+  return (res.data.files || []).map((f) => ({
+    source: "drive",
+    title: f.name,
+    url: f.webViewLink,
+  }));
 }
 
 async function searchDrive(saKeyJson, query, folderId) {
@@ -63,35 +95,26 @@ async function searchDrive(saKeyJson, query, folderId) {
     });
     const drive = google.drive({ version: "v3", auth });
 
-    const textoEscapado = query.replace(/'/g, "\\'");
-    let q = `fullText contains '${textoEscapado}' and trashed = false`;
+    const resultadosFiltrados = await ejecutarBusquedaDrive(drive, query, folderId);
 
-    // Si viene un filtro de carpeta (Año/Equipo elegido en los desplegables),
-    // restringimos a esa carpeta y a todas sus subcarpetas.
-    if (folderId) {
-      const ids = await recolectarSubcarpetas(drive, folderId);
-      const clausulaParents = ids.map((id) => `'${id}' in parents`).join(" or ");
-      q += ` and (${clausulaParents})`;
+    // Si buscabas dentro de un Año/Equipo y no salió nada, reintenta sin
+    // el filtro, en todo el Drive, para no devolver "no encontré nada" en falso.
+    if (folderId && resultadosFiltrados.length === 0) {
+      const resultadosGlobales = await ejecutarBusquedaDrive(drive, query, undefined);
+      return {
+        resultados: resultadosGlobales,
+        fueraDelFiltro: resultadosGlobales.length > 0,
+      };
     }
 
-    const res = await drive.files.list({
-      q,
-      fields: "files(id, name, webViewLink, mimeType, modifiedTime)",
-      pageSize: 8,
-    });
-
-    return (res.data.files || []).map((f) => ({
-      source: "drive",
-      title: f.name,
-      url: f.webViewLink,
-    }));
+    return { resultados: resultadosFiltrados, fueraDelFiltro: false };
   } catch (err) {
     console.error("Error buscando en Drive:", err.message);
-    return [];
+    return { resultados: [], fueraDelFiltro: false };
   }
 }
 
-async function interpretarConGemini(apiKey, pregunta, resultados) {
+async function interpretarConGemini(apiKey, pregunta, resultados, fueraDelFiltro) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
@@ -99,12 +122,17 @@ async function interpretarConGemini(apiKey, pregunta, resultados) {
     .map((r, i) => `${i + 1}. [${r.source.toUpperCase()}] "${r.title}" -> ${r.url}`)
     .join("\n");
 
+  const notaFiltro = fueraDelFiltro
+    ? `\nNOTA: no se encontró nada dentro del Año/Equipo que la persona filtró, así que estos resultados vienen de una búsqueda en TODO el Drive. Menciónalo brevemente en "intro" (ej. "no encontré nada en ese filtro, pero sí en el resto del Drive:").`
+    : "";
+
   const prompt = `
 Eres el buscador interno de "Global Talks" (GT), grupo extraacadémico de la UPC.
 Un integrante te hizo esta pregunta: "${pregunta}"
 
 Estos son los resultados encontrados en Notion y Google Drive:
 ${listado || "(no se encontraron resultados)"}
+${notaFiltro}
 
 Responde ÚNICAMENTE con un objeto JSON válido, sin texto antes ni después,
 sin markdown, sin bloques de código, con esta forma exacta:
@@ -156,16 +184,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    const [notionResults, driveResults] = await Promise.all([
+    const [notionResults, driveResultado] = await Promise.all([
       searchNotion(process.env.NOTION_TOKEN, query),
       searchDrive(process.env.GDRIVE_SA_KEY, query, folderId),
     ]);
 
-    const resultados = [...notionResults, ...driveResults];
+    const resultados = [...notionResults, ...driveResultado.resultados];
     const respuesta = await interpretarConGemini(
       process.env.GEMINI_API_KEY,
       query,
-      resultados
+      resultados,
+      driveResultado.fueraDelFiltro
     );
 
     return res.status(200).json({ respuesta });
